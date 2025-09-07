@@ -1,0 +1,98 @@
+name: price-tracker
+
+on:
+  schedule:
+    - cron: "0 * * * *"   # cada hora
+  workflow_dispatch: {}
+
+jobs:
+  track:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repo
+        uses: actions/checkout@v4
+
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install requests
+
+      - name: Run tracker
+        env:
+          # 👇 Reemplaza estos tres con tus claves 👇
+          ITAD_API_KEY: "e7042e77a75adc0e213a7d72321f5d6bd6a7439b"
+          PUSHOVER_USER: "uuxn5yknp86f48ykd92bgg2uiyg7nw"
+          PUSHOVER_TOKEN: "aam5u7zmaj7uoqr24jycdv84wyk6r6"
+
+          # Configuración
+          ML_COMMISSION: "0.13"   # 13% comisión ML
+          TAX_RATE: "0.19"        # IVA 19%
+          MARGIN: "0.25"          # 25% margen deseado
+          FX_TO_CLP: "950"        # USD a CLP
+          ALERT_PCT: "5"          # alerta si cambia más del 5%
+        run: |
+          import os, math, requests
+
+          api_key = os.getenv("ITAD_API_KEY")
+          push_user = os.getenv("PUSHOVER_USER")
+          push_token = os.getenv("PUSHOVER_TOKEN")
+
+          # Config
+          commission = float(os.getenv("ML_COMMISSION","0.13"))
+          tax = float(os.getenv("TAX_RATE","0.19"))
+          margin = float(os.getenv("MARGIN","0.25"))
+          fx = float(os.getenv("FX_TO_CLP","950"))
+
+          # Juegos a seguir
+          games = ["Elden Ring", "Hollow Knight"]
+
+          session = requests.Session()
+          session.headers.update({"User-Agent":"tracker"})
+          if api_key:
+              session.headers.update({"X-Api-Key": api_key})
+
+          BASE = "https://api.isthereanydeal.com"
+
+          def search_plain(title):
+              r = session.get(f"{BASE}/v02/game/plain/", params={"title": title})
+              if r.ok:
+                  d = r.json().get("data")
+                  if isinstance(d, dict):
+                      return d.get("plain")
+                  if isinstance(d, list) and d:
+                      return d[0].get("plain")
+
+          def best_price(plain):
+              r = session.get(f"{BASE}/v02/game/prices/", params={"plains": plain, "country":"CL"})
+              if r.ok:
+                  lst = r.json().get("data",{}).get(plain,{}).get("list",[])
+                  if lst:
+                      return min(lst, key=lambda x: x.get("price",9999))
+
+          def suggest(cost):
+              denom = 1 - (commission + tax + margin)
+              if denom <= 0: denom = 0.01
+              sale = math.ceil(cost / denom)
+              return sale, sale * fx
+
+          for title in games:
+              plain = search_plain(title)
+              if not plain: continue
+              bp = best_price(plain)
+              if not bp: continue
+              price = bp["price"]
+              sale, sale_clp = suggest(price)
+              msg = f"{title}: {price} {bp['currency']} en {bp['shop']['name']}\nSugerido ML: {sale} USD (~{int(sale_clp)} CLP)"
+              print(msg)
+              if push_user and push_token:
+                  requests.post("https://api.pushover.net/1/messages.json", data={
+                    "token": push_token,
+                    "user": push_user,
+                    "title": f"{title} precio",
+                    "message": msg
+                  })
