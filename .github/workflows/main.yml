@@ -1,4 +1,31 @@
+name: Price Tracker
+
+on:
+  workflow_dispatch:
+  # Opcional: ejecutarlo todos los días a las 09:00 Chile (12:00 UTC)
+  schedule:
+    - cron: "0 12 * * *"
+
+jobs:
+  run:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install requests
+
       - name: Create script
+        shell: bash
         run: |
           cat > tracker.py << 'PY'
           import os, math, requests, sys
@@ -11,7 +38,7 @@
           TAX_RATE     = float(os.getenv("TAX_RATE","0.19"))
           MARGIN       = float(os.getenv("MARGIN","0.25"))
           FX           = float(os.getenv("FX_TO_CLP","950"))
-          COUNTRY      = os.getenv("COUNTRY","US").upper()  # ← US suele devolver más resultados
+          COUNTRY      = os.getenv("COUNTRY","US").upper()
           GAMES_ENV    = os.getenv("GAMES","").strip()
 
           # ====== Juegos: usa games.txt (si existe) o env GAMES ======
@@ -32,13 +59,11 @@
           BASE = "https://api.isthereanydeal.com"
 
           def _add_key(params:dict)->dict:
-              # v01 acepta ?key=... (recomendado). Si no tienes key, igual funciona con límites.
               if API_KEY:
                   params = dict(params)
                   params["key"] = API_KEY
               return params
 
-          # ---- v01: búsqueda por nombre -> obtiene 'plain'
           def search_plain(title:str):
               url = f"{BASE}/v01/game/search/"
               params = _add_key({"q": title, "limit": 1})
@@ -52,12 +77,11 @@
                   return None
               return items[0].get("plain")
 
-          # ---- v01: mejores precios por plain
           def best_price(plain:str):
               url = f"{BASE}/v01/game/prices/"
               params = _add_key({
                   "plains": plain,
-                  "country": COUNTRY,   # prueba US primero; luego puedes volver a CL
+                  "country": COUNTRY,
                   "strict": 0
               })
               r = sess.get(url, params=params, timeout=20)
@@ -69,7 +93,6 @@
               if not lst:
                   return None
               best = min(lst, key=lambda x: x.get("price_new", 1e9))
-              # Campos en v01
               price = float(best.get("price_new",0))
               curr  = best.get("price_currency","USD")
               shop  = (best.get("shop") or {}).get("name","")
