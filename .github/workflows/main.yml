@@ -1,8 +1,3 @@
-Repetiste: “mejor envíame el código hasta       - name: Run tracker”
-Versión corregida: “mejor, envíame el código hasta - name: Run tracker”.
-
-Aquí tienes el workflow completo hasta esa línea (incluye el script actualizado con los endpoints nuevos de ITAD). Pega tal cual en .github/workflows/price-tracker.yml:
-
 name: Price Tracker
 
 on:
