@@ -143,7 +143,7 @@ jobs:
       - name: Run tracker
         env:
           # 👇 Reemplaza estas 3 líneas con tus claves 👇
-          ITAD_API_KEY: "e7042e77a75adc0e213a7d72321f5d6bd6a7439b"
+          ITAD_API_KEY: "b540037d2c19cc2e6d4fda8eb246040d2e18c119"
           PUSHOVER_USER: "uuxn5yknp86f48ykd92bgg2uiyg7nw"
           PUSHOVER_TOKEN: "aam5u7zmaj7uoqr24jycdv84wyk6r6"
 
