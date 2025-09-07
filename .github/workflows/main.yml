@@ -3,7 +3,7 @@ name: Price Tracker
 on:
   workflow_dispatch:
   schedule:
-    - cron: "0 12 * * *" # 09:00 Chile (UTC-3) ~ 12:00 UTC
+    - cron: "0 12 * * *" # 09:00 Chile (UTC-3) ≈ 12:00 UTC
 
 jobs:
   run:
@@ -40,6 +40,10 @@ jobs:
           COUNTRY      = os.getenv("COUNTRY","US").upper()
           GAMES_ENV    = os.getenv("GAMES","").strip()
 
+          if not API_KEY:
+              print("ERROR: Falta ITAD_API_KEY (configura el env/secret).")
+              sys.exit(1)
+
           # ====== Juegos: usa games.txt (si existe) o env GAMES ======
           games = []
           try:
@@ -54,13 +58,12 @@ jobs:
               sys.exit(0)
 
           sess = requests.Session()
-          sess.headers.update({"User-Agent":"price-tracker/1.3"})
+          sess.headers.update({"User-Agent":"price-tracker/1.4"})
           BASE = "https://api.isthereanydeal.com"
 
           def _add_key(params:dict)->dict:
               params = dict(params)
-              if API_KEY:
-                  params["key"] = API_KEY
+              params["key"] = API_KEY
               return params
 
           # ---- v1: búsqueda por nombre -> obtiene 'id'
@@ -68,6 +71,9 @@ jobs:
               url = f"{BASE}/games/search/v1"
               params = _add_key({"title": title, "results": 1})
               r = sess.get(url, params=params, timeout=20)
+              if r.status_code == 403:
+                  print("[ERROR] ITAD 403: Invalid or expired api key. Revisa ITAD_API_KEY.")
+                  sys.exit(1)
               if not r.ok:
                   print(f"[WARN] search {title}: {r.status_code} {r.text[:200]}")
                   return None
@@ -77,10 +83,14 @@ jobs:
               return data[0].get("id"), data[0].get("title")
 
           # ---- v2: overview de precios por IDs (POST)
+          # Devuelve (precio_mas_barato, moneda, url_itad)
           def best_price_overview(game_id:str):
               url = f"{BASE}/games/overview/v2"
               params = _add_key({"country": COUNTRY})
               r = sess.post(url, params=params, json=[game_id], timeout=20)
+              if r.status_code == 403:
+                  print("[ERROR] ITAD 403: Invalid or expired api key. Revisa ITAD_API_KEY.")
+                  sys.exit(1)
               if not r.ok:
                   print(f"[WARN] overview {game_id}: {r.status_code} {r.text[:200]}")
                   return None
@@ -90,12 +100,12 @@ jobs:
                   return None
               item = prices[0]
               cur  = (item.get("current") or {})
-              shop = (cur.get("shop") or {}).get("name","")
               price = (cur.get("price") or {}).get("amount", 0.0)
               curr  = (cur.get("price") or {}).get("currency","USD")
-              url   = cur.get("url") or (item.get("urls") or {}).get("game","")
-              return float(price), curr, shop, url
+              itad_url = (item.get("urls") or {}).get("game","")
+              return float(price), curr, itad_url
 
+          # (se mantiene por si quieres usarlo luego, aunque ya no se imprime)
           def suggest_sale(cost_usd: float):
               denom = 1 - (COMMISSION + TAX_RATE + MARGIN)
               if denom <= 0:
@@ -129,10 +139,11 @@ jobs:
                   print(f"⚠️ {title}: sin precios para {COUNTRY} (overview v2)")
                   continue
               any_found = True
-              price, curr, shop, url = res
-              sale_usd, sale_clp = suggest_sale(price)
+              price, curr, itad_url = res
+
               shown = canonical or title
-              msg = f"{shown}: {price:.2f} {curr} · {shop}\nSugerido ML: {sale_usd} USD (~{sale_clp:,} CLP)\n{url}".replace(",", ".")
+              # Solo precio más barato y link a la página de ITAD (lista completa)
+              msg = f"{shown}\n{price:.2f} {curr}\n{itad_url}".replace(",", ".")
               print(msg)
               push(f"Precio {title}", msg)
 
