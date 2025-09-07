@@ -101,7 +101,7 @@ jobs:
               item = prices[0]
               cur  = (item.get("current") or {})
               price = (cur.get("price") or {}).get("amount", 0.0)
-              curr  = (cur.get("price") or {}).get("currency","USD")
+              curr  = (cur.get("price") or {}).get("currency","CLP")
               itad_url = (item.get("urls") or {}).get("game","")
               return float(price), curr, itad_url
 
