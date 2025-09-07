@@ -1,4 +1,4 @@
-name: Price Tracker
+name: name: Price Tracker
 
 on:
   workflow_dispatch:
@@ -33,18 +33,19 @@ jobs:
           API_KEY      = os.getenv("ITAD_API_KEY","").strip()
           PUSH_USER    = os.getenv("PUSHOVER_USER","").strip()
           PUSH_TOKEN   = os.getenv("PUSHOVER_TOKEN","").strip()
-          COMMISSION   = float(os.getenv("ML_COMMISSION","0.13"))
-          TAX_RATE     = float(os.getenv("TAX_RATE","0.19"))
-          MARGIN       = float(os.getenv("MARGIN","0.25"))
-          FX           = float(os.getenv("FX_TO_CLP","950"))
-          COUNTRY      = os.getenv("COUNTRY","US").upper()
-          GAMES_ENV    = os.getenv("GAMES","").strip()
 
-          if not API_KEY:
-              print("ERROR: Falta ITAD_API_KEY (configura el env/secret).")
-              sys.exit(1)
+          # Precios / márgenes
+          MARGIN       = float(os.getenv("MARGIN","0.25"))     # % de utilidad deseada (opcional)
+          FX           = float(os.getenv("FX_TO_CLP","950"))    # sólo se usa si el precio NO viene en CLP
+          COUNTRY      = os.getenv("COUNTRY","CL").upper()      # Forzamos CL por defecto
+
+          # Mercado Libre CL (pedido del usuario)
+          ML_COMMISSION = float(os.getenv("ML_COMMISSION","0.19"))  # 19% comisión
+          ML_FEE_700_LT = int(os.getenv("ML_FEE_700_THRESHOLD","9990"))  # umbral 9.990
+          ML_FEE_700    = int(os.getenv("ML_FEE_700","700"))          # $700 si costo < umbral
 
           # ====== Juegos: usa games.txt (si existe) o env GAMES ======
+          GAMES_ENV    = os.getenv("GAMES","").strip()
           games = []
           try:
               with open("games.txt","r",encoding="utf-8") as f:
@@ -57,8 +58,12 @@ jobs:
               print("No hay juegos. Agrega games.txt o env GAMES.")
               sys.exit(0)
 
+          if not API_KEY:
+              print("ERROR: Falta ITAD_API_KEY (configura secret/env).")
+              sys.exit(1)
+
           sess = requests.Session()
-          sess.headers.update({"User-Agent":"price-tracker/1.4"})
+          sess.headers.update({"User-Agent":"price-tracker/1.5"})
           BASE = "https://api.isthereanydeal.com"
 
           def _add_key(params:dict)->dict:
@@ -82,9 +87,9 @@ jobs:
                   return None
               return data[0].get("id"), data[0].get("title")
 
-          # ---- v2: overview de precios por IDs (POST)
-          # Devuelve (precio_mas_barato, moneda, url_itad)
-          def best_price_overview(game_id:str):
+          # ---- v2: overview por IDs (POST) -> mejor precio actual y regular; link ITAD
+          # Devuelve (price_clp, regular_clp, itad_url)
+          def overview_clp(game_id:str):
               url = f"{BASE}/games/overview/v2"
               params = _add_key({"country": COUNTRY})
               r = sess.post(url, params=params, json=[game_id], timeout=20)
@@ -101,18 +106,34 @@ jobs:
               item = prices[0]
               cur  = (item.get("current") or {})
               price = (cur.get("price") or {}).get("amount", 0.0)
-              curr  = (cur.get("price") or {}).get("currency","CLP")
+              curr  = (cur.get("price") or {}).get("currency","USD")
+              regular = (cur.get("regular") or {}).get("amount", price)  # “precio anterior”
               itad_url = (item.get("urls") or {}).get("game","")
-              return float(price), curr, itad_url
 
-          # (se mantiene por si quieres usarlo luego, aunque ya no se imprime)
-          def suggest_sale(cost_usd: float):
-              denom = 1 - (COMMISSION + TAX_RATE + MARGIN)
-              if denom <= 0:
-                  denom = 0.01
-              sale_usd = math.ceil(cost_usd / denom)
-              sale_clp = int(round(sale_usd * FX))
-              return sale_usd, sale_clp
+              # Filtrar SOLO ofertas en CLP (activables/dirigidas a Chile)
+              if curr != "CLP":
+                  # Si el usuario lo permite, podríamos convertir; pero pidió CLP y activables en CL → omitimos
+                  return None
+
+              price_clp   = float(price)
+              regular_clp = float(regular)
+              return price_clp, regular_clp, itad_url
+
+          # ===== ML recomendado =====
+          # Queremos un precio de venta 'p' tal que:
+          # ingreso_neto = p*(1-ML_COMMISSION) - fee >= costo*(1+MARGIN)
+          # fee = 700 si costo < 9990, sino 0
+          def ml_recommended(costo_clp: float) -> int:
+              fee = ML_FEE_700 if costo_clp < ML_FEE_700_LT else 0
+              objetivo = costo_clp * (1.0 + MARGIN)
+              denom = (1.0 - ML_COMMISSION)
+              if denom <= 0: denom = 0.01
+              p = (objetivo + fee) / denom
+              # redondeo psicológico: al múltiplo de 10 más cercano y terminar en 90 cuando aplica
+              p = int(round(p / 10.0) * 10)
+              if p % 100 != 90:
+                  p = (p // 100) * 100 + 90
+              return max(p, int(costo_clp)+500)  # nunca menor al costo + 500
 
           def push(title:str, message:str):
               if not (PUSH_USER and PUSH_TOKEN):
@@ -134,21 +155,36 @@ jobs:
                   print(f"❓ {title}: no encontrado (search v1)")
                   continue
               game_id, canonical = found
-              res = best_price_overview(game_id)
+              res = overview_clp(game_id)
               if not res:
-                  print(f"⚠️ {title}: sin precios para {COUNTRY} (overview v2)")
+                  print(f"⚠️ {title}: sin oferta en CLP/Chile (overview v2 con country={COUNTRY})")
                   continue
               any_found = True
-              price, curr, itad_url = res
+              price_clp, regular_clp, itad_url = res
 
+              recomendado = ml_recommended(price_clp)
               shown = canonical or title
-              # Solo precio más barato y link a la página de ITAD (lista completa)
-              msg = f"{shown}\n{price:.2f} {curr}\n{itad_url}".replace(",", ".")
+
+              # Salida pedida: solo CLP, “anterior: nuevo” y recomendado ML + link ITAD
+              # Ejemplo:
+              # Elden Ring
+              # Anterior: $44.990 → Nuevo: $31.990
+              # ML recomendado: $39.990
+              # https://isthereanydeal.com/game/...
+              def fmt(n): 
+                  return f"${int(round(n)):,}".replace(",", ".")
+
+              msg = (
+                  f"{shown}\n"
+                  f"Anterior: {fmt(regular_clp)} \u2192 Nuevo: {fmt(price_clp)}\n"
+                  f"ML recomendado: {fmt(recomendado)}\n"
+                  f"{itad_url}"
+              )
               print(msg)
               push(f"Precio {title}", msg)
 
           if not any_found:
-              print("[INFO] No se obtuvieron precios. Prueba cambiar COUNTRY a 'US' o 'EU' y revisa títulos exactos.")
+              print("[INFO] No se obtuvieron precios en CLP para Chile. Revisa títulos exactos o cambia COUNTRY a 'CL' (ya está) / tiendas con disponibilidad regional.")
           PY
 
       - name: Run tracker
