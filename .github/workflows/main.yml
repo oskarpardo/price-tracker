@@ -2,14 +2,15 @@ name: price-tracker
 
 on:
   schedule:
-    - cron: "0 * * * *"   # cada hora
-  workflow_dispatch: {}
+    - cron: "0 * * * *"   # corre cada hora
+  workflow_dispatch: {}    # para correrlo manualmente
 
 jobs:
   track:
     runs-on: ubuntu-latest
+
     steps:
-      - name: Checkout repo
+      - name: Checkout
         uses: actions/checkout@v4
 
       - name: Setup Python
@@ -17,82 +18,123 @@ jobs:
         with:
           python-version: "3.11"
 
-      - name: Install dependencies
+      - name: Install deps
         run: |
           python -m pip install --upgrade pip
           pip install requests
 
+      - name: Create script
+        run: |
+          cat > tracker.py << 'PY'
+          import os, math, requests
+
+          # ====== CONFIG (lee del env del paso "Run tracker") ======
+          API_KEY      = os.getenv("ITAD_API_KEY","").strip()
+          PUSH_USER    = os.getenv("PUSHOVER_USER","").strip()
+          PUSH_TOKEN   = os.getenv("PUSHOVER_TOKEN","").strip()
+          COMMISSION   = float(os.getenv("ML_COMMISSION","0.13"))
+          TAX_RATE     = float(os.getenv("TAX_RATE","0.19"))
+          MARGIN       = float(os.getenv("MARGIN","0.25"))
+          FX           = float(os.getenv("FX_TO_CLP","950"))
+          COUNTRY      = os.getenv("COUNTRY","CL").upper()
+          GAMES_ENV    = os.getenv("GAMES","").strip()
+
+          # ====== Juegos: usa games.txt (si existe) o env GAMES ======
+          games = []
+          try:
+              with open("games.txt","r",encoding="utf-8") as f:
+                  games = [l.strip() for l in f if l.strip()]
+          except FileNotFoundError:
+              if GAMES_ENV:
+                  for part in GAMES_ENV.replace(",", "\n").splitlines():
+                      if part.strip(): games.append(part.strip())
+          if not games:
+              print("No hay juegos. Agrega games.txt o env GAMES.")
+              raise SystemExit(0)
+
+          session = requests.Session()
+          session.headers.update({"User-Agent":"price-tracker/1.0"})
+          if API_KEY:
+              session.headers.update({"X-Api-Key": API_KEY})
+
+          BASE = "https://api.isthereanydeal.com"
+
+          def search_plain(title:str):
+              r = session.get(f"{BASE}/v02/game/plain/", params={"title": title}, timeout=20)
+              if not r.ok: return None
+              d = r.json().get("data")
+              if isinstance(d, dict):  return d.get("plain")
+              if isinstance(d, list) and d: return d[0].get("plain")
+              return None
+
+          def best_price(plain:str):
+              r = session.get(f"{BASE}/v02/game/prices/", params={"plains": plain, "country": COUNTRY}, timeout=20)
+              if not r.ok: return None
+              lst = r.json().get("data",{}).get(plain,{}).get("list",[])
+              if not lst: return None
+              # menor precio
+              best = min(lst, key=lambda x: x.get("price", 1e9))
+              # normaliza campos
+              curr = best.get("currency","USD")
+              shop = (best.get("shop") or {}).get("name","")
+              url  = best.get("url","")
+              return float(best.get("price",0)), curr, shop, url
+
+          def suggest_sale(cost_usd: float) -> tuple[int,int]:
+              # Precio de publicación que deja margen deseado considerando comisión+impuestos
+              denom = 1 - (COMMISSION + TAX_RATE + MARGIN)
+              if denom <= 0: denom = 0.01
+              sale_usd = math.ceil(cost_usd / denom)
+              sale_clp = int(round(sale_usd * FX))
+              return sale_usd, sale_clp
+
+          def push(title:str, message:str):
+              if not (PUSH_USER and PUSH_TOKEN):
+                  print("[INFO] Pushover no configurado, omito push.")
+                  return
+              r = requests.post("https://api.pushover.net/1/messages.json", data={
+                  "token": PUSH_TOKEN,
+                  "user": PUSH_USER,
+                  "title": title,
+                  "message": message
+              }, timeout=20)
+              print(f"[Pushover] status={r.status_code} {r.text[:120]}")
+
+          # ====== Ejecuta ======
+          for title in games:
+              plain = search_plain(title)
+              if not plain:
+                  print(f"❓ {title}: no encontrado en ITAD")
+                  continue
+              res = best_price(plain)
+              if not res:
+                  print(f"⚠️ {title}: sin precios para {COUNTRY}")
+                  continue
+
+              price, curr, shop, url = res
+              sale_usd, sale_clp = suggest_sale(price)
+              msg = f"{title}: {price:.2f} {curr} · {shop}\nSugerido ML: {sale_usd} USD (~{sale_clp:,} CLP)\n{url}".replace(",", ".")
+
+              print(msg)
+              push(f"Precio {title}", msg)
+          PY
+
       - name: Run tracker
         env:
-          # 👇 Reemplaza estos tres con tus claves 👇
+          # 👇 Reemplaza estas 3 líneas con tus claves 👇
           ITAD_API_KEY: "e7042e77a75adc0e213a7d72321f5d6bd6a7439b"
           PUSHOVER_USER: "uuxn5yknp86f48ykd92bgg2uiyg7nw"
           PUSHOVER_TOKEN: "aam5u7zmaj7uoqr24jycdv84wyk6r6"
 
-          # Configuración
-          ML_COMMISSION: "0.13"   # 13% comisión ML
-          TAX_RATE: "0.19"        # IVA 19%
-          MARGIN: "0.25"          # 25% margen deseado
-          FX_TO_CLP: "950"        # USD a CLP
-          ALERT_PCT: "5"          # alerta si cambia más del 5%
-        run: |
-          import os, math, requests
+          # Config rápida (ajústala cuando quieras)
+          ML_COMMISSION: "0.13"
+          TAX_RATE: "0.19"
+          MARGIN: "0.25"
+          FX_TO_CLP: "950"
+          COUNTRY: "CL"
 
-          api_key = os.getenv("ITAD_API_KEY")
-          push_user = os.getenv("PUSHOVER_USER")
-          push_token = os.getenv("PUSHOVER_TOKEN")
-
-          # Config
-          commission = float(os.getenv("ML_COMMISSION","0.13"))
-          tax = float(os.getenv("TAX_RATE","0.19"))
-          margin = float(os.getenv("MARGIN","0.25"))
-          fx = float(os.getenv("FX_TO_CLP","950"))
-
-          # Juegos a seguir
-          games = ["Elden Ring", "Hollow Knight"]
-
-          session = requests.Session()
-          session.headers.update({"User-Agent":"tracker"})
-          if api_key:
-              session.headers.update({"X-Api-Key": api_key})
-
-          BASE = "https://api.isthereanydeal.com"
-
-          def search_plain(title):
-              r = session.get(f"{BASE}/v02/game/plain/", params={"title": title})
-              if r.ok:
-                  d = r.json().get("data")
-                  if isinstance(d, dict):
-                      return d.get("plain")
-                  if isinstance(d, list) and d:
-                      return d[0].get("plain")
-
-          def best_price(plain):
-              r = session.get(f"{BASE}/v02/game/prices/", params={"plains": plain, "country":"CL"})
-              if r.ok:
-                  lst = r.json().get("data",{}).get(plain,{}).get("list",[])
-                  if lst:
-                      return min(lst, key=lambda x: x.get("price",9999))
-
-          def suggest(cost):
-              denom = 1 - (commission + tax + margin)
-              if denom <= 0: denom = 0.01
-              sale = math.ceil(cost / denom)
-              return sale, sale * fx
-
-          for title in games:
-              plain = search_plain(title)
-              if not plain: continue
-              bp = best_price(plain)
-              if not bp: continue
-              price = bp["price"]
-              sale, sale_clp = suggest(price)
-              msg = f"{title}: {price} {bp['currency']} en {bp['shop']['name']}\nSugerido ML: {sale} USD (~{int(sale_clp)} CLP)"
-              print(msg)
-              if push_user and push_token:
-                  requests.post("https://api.pushover.net/1/messages.json", data={
-                    "token": push_token,
-                    "user": push_user,
-                    "title": f"{title} precio",
-                    "message": msg
-                  })
+          # Juegos por nombre (si no subes games.txt)
+          GAMES: |
+            Elden Ring
+            Hollow Knight
+        run: python tracker.py
